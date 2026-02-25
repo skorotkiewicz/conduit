@@ -52,7 +52,7 @@ Protect your local compute resources by defining rate limits and usage schedules
 # Network Settings
 http_port: 8888
 p2p_port: 8000
-bootstrap_nodes: ["/ip4/YOUR_VPS_IP/tcp/8000"]
+bootstrap_nodes: ["/ip4/YOUR_VPS_IP/tcp/8000"] # for now just use the first bootstrap node in the array
 
 # Provider Capabilities
 local_llm: "http://127.0.0.1:11434/v1"
