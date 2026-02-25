@@ -40,9 +40,10 @@ Run a node to connect to the network and query models. You need the public addre
 cargo run --release -- \
   --p2p-port 8001 \
   --http-port 8889 \
-  --bootstrap /ip4/YOUR_HOME_PUBLIC_IP/tcp/8000
+  --bootstrap /ip4/YOUR_HOME_PUBLIC_IP/tcp/8000 \
+  --access-key "tutu"
 ```
-*Your local proxy API on this travel machine is now listening at `http://localhost:8889/v1`.*
+*Your local proxy API on this travel machine is now listening at `http://localhost:8889/v1` and requires the `Bearer tutu` authorization token.*
 
 #### Provider Configuration (`config.yml`)
 Protect your local compute resources by defining rate limits and usage schedules:
@@ -55,6 +56,8 @@ bootstrap_nodes: ["/ip4/YOUR_VPS_IP/tcp/8000"]
 
 # Provider Capabilities
 local_llm: "http://127.0.0.1:11434/v1"
+local_llm_api_key: "sk-xyz123" # Optional downstream auth
+access_key: "tutu" # Required for P2P/Local clients to access this node
 models: ["llama-3", "mistral-7b"]
 
 # Protection Rules
@@ -83,10 +86,11 @@ Then, everyone else (consumers and providers) can connect using your VPS IP:
 `--bootstrap /ip4/YOUR_VPS_IP/tcp/8000`
 
 ### 4. Making Requests
-Once connected to the swarm, interact with your local Conduit consumer node exactly as you would with the official OpenAI API:
+Once connected to the swarm, interact with your local Conduit consumer node exactly as you would with the official OpenAI API. Don't forget your configured access key!
 
 ```bash
 curl -X POST http://localhost:8888/v1/chat/completions \
+  -H "Authorization: Bearer tutu" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "llama-3",
