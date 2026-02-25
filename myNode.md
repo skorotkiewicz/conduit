@@ -27,6 +27,8 @@ curl -X POST http://localhost:8890/v1/chat/completions \
 
 ---
 my setup:
+
+hosted on my home pc with local guff file, also please do not abuse it
 ```
 model: glm4
 max_context: 5000
