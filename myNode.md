@@ -1,8 +1,16 @@
 ## You can test with my local llm:
 
+you can download binary: https://github.com/skorotkiewicz/conduit/releases
 
 ```
 cargo run --release -- \
+  --p2p-port 8002 \
+  --http-port 8890 \
+  --bootstrap /ip4/172.232.46.58/tcp/1334
+
+chmod +x conduit-linux-x86_64 
+
+./conduit-linux-x86_64 \
   --p2p-port 8002 \
   --http-port 8890 \
   --bootstrap /ip4/172.232.46.58/tcp/1334
