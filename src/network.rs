@@ -11,6 +11,7 @@ pub struct InferenceRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub stream: Option<bool>,
+    pub access_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

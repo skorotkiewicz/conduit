@@ -20,6 +20,8 @@ pub struct ProviderConfig {
     pub rate_limit: Option<RateLimitConfig>,
     pub schedule: Option<ScheduleConfig>,
     pub local_llm: Option<String>,
+    pub local_llm_api_key: Option<String>,
+    pub access_key: Option<String>,
     pub models: Option<Vec<String>>,
     pub http_port: Option<u16>,
     pub p2p_port: Option<u16>,
@@ -55,7 +57,15 @@ impl ProviderConfig {
         &self,
         request_timestamps: &std::sync::Mutex<Vec<std::time::Instant>>,
         context_length: u32,
+        provided_access_key: Option<&str>,
     ) -> Result<(), String> {
+        // 0. Access Key Check
+        if let Some(ref required_key) = self.access_key {
+            if provided_access_key != Some(required_key.as_str()) {
+                return Err("Invalid or missing access key.".to_string());
+            }
+        }
+
         // 1. Schedule Check
         if !self.is_within_schedule() {
             return Err("Provider is currently outside of usage hours.".to_string());

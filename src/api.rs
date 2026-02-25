@@ -12,10 +12,13 @@ use crate::network::{InferenceRequest, InferenceResponse};
 #[derive(Clone)]
 pub struct AppState {
     pub network_tx: mpsc::Sender<NetworkCommand>,
+    pub access_key: Option<String>,
+    pub local_llm_api_key: Option<String>,
     // pub local_llm: Option<String>,
     // pub hosted_models: Vec<String>,
     // pub provider_config: Option<crate::config::ProviderConfig>,
     // pub request_timestamps: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    // /TUTU
 }
 
 #[derive(Debug)]
@@ -72,8 +75,24 @@ pub struct ModelQuery {
 
 async fn list_models(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<ModelQuery>,
-) -> Json<ModelsResponse> {
+) -> Response {
+    // 0. Check access key if configured
+    if let Some(ref required_key) = state.access_key {
+        let auth_header = headers.get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok());
+        
+        let provided_key = auth_header.and_then(|h| h.strip_prefix("Bearer "));
+        
+        if provided_key != Some(required_key) {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "Invalid or missing access key" }))
+            ).into_response();
+        }
+    }
+
     let model_name = query.model.unwrap_or_else(|| "default-model".to_string());
     
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -88,7 +107,7 @@ async fn list_models(
         return Json(ModelsResponse {
             object: "list".to_string(),
             data: vec![], // Return empty if networking is down
-        });
+        }).into_response();
     }
 
     // Wait for the DHT response with a timeout
@@ -109,13 +128,36 @@ async fn list_models(
     Json(ModelsResponse {
         object: "list".to_string(),
         data,
-    })
+    }).into_response()
 }
 
-async fn chat_completions(State(state): State<AppState>, Json(payload): Json<InferenceRequest>) -> Response {
+async fn chat_completions(
+    State(state): State<AppState>, 
+    headers: axum::http::HeaderMap,
+    Json(mut payload): Json<InferenceRequest>
+) -> Response {
+    let auth_header = headers.get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+    
+    let provided_key = auth_header.and_then(|h| h.strip_prefix("Bearer "));
+    
+    // 0. Forward the access key to the P2P payload!
+    payload.access_key = provided_key.map(|s| s.to_string());
+
+    // 1. Check access key if configured for THIS local API proxy
+    if let Some(ref required_key) = state.access_key {
+        if provided_key != Some(required_key.as_str()) {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "Invalid or missing access key" }))
+            ).into_response();
+        }
+    }
+
     let model_name = payload.model.clone();
     let is_streaming = payload.stream.unwrap_or(false);
     
+    // TUTU
     // // 0. Check if we host this model locally!
     // if state.hosted_models.contains(&model_name) {
     //     if let Some(local_url) = state.local_llm {
@@ -134,7 +176,13 @@ async fn chat_completions(State(state): State<AppState>, Json(payload): Json<Inf
     //         }
 
     //         let full_url = format!("{}/chat/completions", local_url.trim_end_matches('/'));
-    //         let client = reqwest::Client::new();
+    //         let mut client_builder = reqwest::Client::builder();
+    //         if let Some(ref api_key) = state.local_llm_api_key {
+    //             let mut headers = header::HeaderMap::new();
+    //             headers.insert(header::AUTHORIZATION, header::HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap());
+    //             client_builder = client_builder.default_headers(headers);
+    //         }
+    //         let client = client_builder.build().unwrap();
             
     //         if is_streaming {
     //             let stream = async_stream::stream! {
@@ -255,8 +303,26 @@ async fn chat_completions(State(state): State<AppState>, Json(payload): Json<Inf
     }
 }
 
-async fn completions() -> Json<serde_json::Value> {
+async fn completions(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    // 0. Check access key if configured
+    if let Some(ref required_key) = state.access_key {
+        let auth_header = headers.get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok());
+        
+        let provided_key = auth_header.and_then(|h| h.strip_prefix("Bearer "));
+        
+        if provided_key != Some(required_key) {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({ "error": "Invalid or missing access key" }))
+            ).into_response();
+        }
+    }
+
     Json(serde_json::json!({
         "error": "/v1/completions is a stub and not implemented yet. Use /v1/chat/completions."
-    }))
+    })).into_response()
 }

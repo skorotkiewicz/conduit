@@ -47,6 +47,10 @@ struct Cli {
     /// Path to config.yml file with rate limits and scheduling
     #[arg(short = 'c', long)]
     config: Option<String>,
+
+    /// Optional access key required to use the local API proxy (Authorization: Bearer <key>)
+    #[arg(short = 'a', long)]
+    access_key: Option<String>,
 }
 
 #[tokio::main]
@@ -160,6 +164,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let app_state = api::AppState { 
         network_tx,
+        access_key: provider_config.as_ref().and_then(|c| c.access_key.clone()),
+        local_llm_api_key: provider_config.as_ref().and_then(|c| c.local_llm_api_key.clone()),
         // local_llm: local_llm_url.clone(),
         // hosted_models: cli.models.clone(),
         // provider_config: provider_config.clone(),
@@ -224,7 +230,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(ref config) = config_opt {
                         let context_length: u32 = request.messages.iter().map(|m| m.content.len() as u32).sum();
                         
-                        if let Err(err_msg) = config.validate_request(&request_timestamps_cloned, context_length) {
+                        if let Err(err_msg) = config.validate_request(&request_timestamps_cloned, context_length, request.access_key.as_deref()) {
                             info!("Rejecting stream request: {}", err_msg);
                             let err_sse = format!("data: {{\"error\": \"{}\"}}\n\n", err_msg);
                             let _ = stream.write_all(err_sse.as_bytes()).await;
@@ -235,9 +241,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                     
                     let local_llm_url = config_opt.as_ref().and_then(|c| c.local_llm.clone());
+                    let local_llm_api_key = config_opt.as_ref().and_then(|c| c.local_llm_api_key.clone());
                     if let Some(llm_url) = local_llm_url {
                         let full_url = format!("{}/chat/completions", llm_url.trim_end_matches('/'));
-                        let client = reqwest::Client::new();
+                        // let client = reqwest::Client::new();
+                        let mut client_builder = reqwest::Client::builder();
+                        
+                        if let Some(api_key) = local_llm_api_key {
+                            let mut headers = axum::http::header::HeaderMap::new();
+                            headers.insert(axum::http::header::AUTHORIZATION, axum::http::header::HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap());
+                            client_builder = client_builder.default_headers(headers);
+                        }
+                        let client = client_builder.build().unwrap();
+
                         
                         match client.post(&full_url).json(&request).send().await {
                             Ok(mut res) => {
@@ -404,7 +420,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             if let Some(ref config) = provider_config {
                                 let context_length: u32 = request.messages.iter().map(|m| m.content.len() as u32).sum();
                                 
-                                if let Err(err_msg) = config.validate_request(&request_timestamps, context_length) {
+                                if let Err(err_msg) = config.validate_request(&request_timestamps, context_length, request.access_key.as_deref()) {
                                     info!("Rejecting P2P request: {}", err_msg);
                                     let _ = swarm.behaviour_mut().request_response.send_response(channel, network::InferenceResponse {
                                         id: "error".to_string(),
@@ -415,13 +431,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
 
                             let local_llm_url = provider_config.as_ref().and_then(|c| c.local_llm.clone());
+                            let local_llm_api_key = provider_config.as_ref().and_then(|c| c.local_llm_api_key.clone());
 
                             if let Some(llm_url) = local_llm_url {
                                 let tx = response_tx.clone();
                                 tokio::spawn(async move {
                                     let full_url = format!("{}/chat/completions", llm_url.trim_end_matches('/'));
-                                    let client = reqwest::Client::new();
+                                    // let client = reqwest::Client::new();
+                                    let mut client_builder = reqwest::Client::builder();
                                     
+                                    if let Some(api_key) = local_llm_api_key {
+                                        let mut headers = axum::http::header::HeaderMap::new();
+                                        headers.insert(axum::http::header::AUTHORIZATION, axum::http::header::HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap());
+                                        client_builder = client_builder.default_headers(headers);
+                                    }
+                                    let client = client_builder.build().unwrap();
+                                    
+
                                     // Make the request to the local LLM
                                     let res = match client.post(&full_url).json(&request).send().await {
                                         Ok(r) => r,
