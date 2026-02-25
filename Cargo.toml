@@ -1,0 +1,42 @@
+[package]
+name = "conduit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.8"
+chrono = "0.4.44"
+clap = { version = "4.5.60", features = ["derive"] }
+futures = "0.3.32"
+libp2p = { version = "0.56.0", features = ["tokio", "tcp", "macros"] }
+libp2p-core = "0.43.2"
+libp2p-identify = "0.47.0"
+libp2p-identity = "0.2.13"
+libp2p-kad = "0.48.0"
+libp2p-noise = "0.46.1"
+libp2p-request-response = { version = "0.29.0", features = ["json"] }
+libp2p-swarm = "0.47.1"
+libp2p-tcp = "0.44.1"
+libp2p-yamux = "0.47.0"
+reqwest = { version = "0.13.2", features = ["json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serde_yaml = "0.9.34"
+tokio = { version = "1.49.0", features = ["full"] }
+tokio-stream = "0.1.18"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.22"
+
+
+[profile.release]
+opt-level = "z"
+debug = false
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+incremental = false
+strip = true
+
+# opt-level = 3   # Maximum performance. I don’t care how big it gets. Make it fast.
+# opt-level = "z" # Minimum size. I care about binary size more than raw speed.
+# opt-level = "s" # Optimize for size, but not as aggressively as "z".
