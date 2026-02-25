@@ -29,7 +29,6 @@ To share a local LLM and act as an entry point for the network, provide your mod
 ```bash
 cargo run --release -- \
   --p2p-port 8000 \
-  --http-port 8888 \
   --models "llama-3" \
   --config config.yml
 ```
@@ -41,35 +40,45 @@ Run a node to connect to the network and query models. You need the public addre
 cargo run --release -- \
   --p2p-port 8001 \
   --http-port 8889 \
-  --bootstrap /ip4/YOUR_HOME_PUBLIC_IP/tcp/8000
+  --bootstrap /ip4/YOUR_HOME_PUBLIC_IP/tcp/8000 \
+  --access-key "tutu"
 ```
-*Your local proxy API on this travel machine is now listening at `http://localhost:8889/v1`.*
+*Your local proxy API on this travel machine is now listening at `http://localhost:8889/v1` and requires the `Bearer tutu` authorization token.*
 
 #### Provider Configuration (`config.yml`)
 Protect your local compute resources by defining rate limits and usage schedules:
 
 ```yaml
-# URL of your local OpenAI-compatible backend (e.g., Ollama, vLLM, LM Studio)
-local_llm: "http://127.0.0.1:11434/v1"
+# Network Settings
+http_port: 8888
+p2p_port: 8000
+bootstrap_nodes: ["/ip4/YOUR_VPS_IP/tcp/8000"]
 
-# Maximum number of requests allowed per minute
+# Provider Capabilities
+local_llm: "http://127.0.0.1:11434/v1"
+local_llm_api_key: "sk-xyz123" # Optional downstream auth
+access_key: "tutu" # Required for P2P/Local clients to access this node
+models: ["llama-3", "mistral-7b"]
+
+# Protection Rules
+max_context: 5000
 rate_limit:
   requests_per_minute: 10
-
-# Time window when your node is actively sharing (local machine time)
 schedule:
   start: "00:00"
   end: "07:00"
 ```
 
-If multiple models are specified via `--models`, Conduit will automatically announce and route requests for all of them to your backend.
+> [!NOTE] 
+> Configuration constraints (schedules, rate limits, max context window) are universally enforced at the routing layer—meaning they apply symmetrically to P2P network queries, long-running P2P streams, and queries submitted directly to your node's local HTTP proxy.
 
 ### 3. Dedicated Bootstrap Node (e.g., on a VPS)
 If you want to run a node *purely* to help other peers discover each other (without hosting any models or making any queries yourself), you can run Conduit on a cloud VPS. Since it defaults to Kademlia Server mode, it will perfectly act as a backbone router!
 
 ```bash
 cargo run --release -- \
-  --p2p-port 8000
+  --p2p-port 8000 \
+  --http-port 9999
 ```
 *Note: This node will participate in the DHT and route traffic for others, but because no `--models` were provided, it won't announce itself as an AI provider.*
 
@@ -77,10 +86,11 @@ Then, everyone else (consumers and providers) can connect using your VPS IP:
 `--bootstrap /ip4/YOUR_VPS_IP/tcp/8000`
 
 ### 4. Making Requests
-Once connected to the swarm, interact with your local Conduit consumer node exactly as you would with the official OpenAI API:
+Once connected to the swarm, interact with your local Conduit consumer node exactly as you would with the official OpenAI API. Don't forget your configured access key!
 
 ```bash
 curl -X POST http://localhost:8888/v1/chat/completions \
+  -H "Authorization: Bearer tutu" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "llama-3",

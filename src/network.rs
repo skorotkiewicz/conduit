@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub struct InferenceRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    pub stream: Option<bool>,
+    pub access_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,4 +40,5 @@ pub struct ConduitBehaviour {
     pub identify: identify::Behaviour,
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
     pub request_response: request_response::json::Behaviour<InferenceRequest, InferenceResponse>,
+    pub stream: libp2p_stream::Behaviour,
 }

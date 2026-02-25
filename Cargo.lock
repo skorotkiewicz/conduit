@@ -166,6 +166,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -528,10 +550,13 @@ dependencies = [
 name = "conduit"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "axum",
+ "bytes",
  "chrono",
  "clap",
  "futures",
+ "futures-util",
  "libp2p",
  "libp2p-core",
  "libp2p-identify",
@@ -539,6 +564,7 @@ dependencies = [
  "libp2p-kad",
  "libp2p-noise",
  "libp2p-request-response",
+ "libp2p-stream",
  "libp2p-swarm",
  "libp2p-tcp",
  "libp2p-yamux",
@@ -548,6 +574,7 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1847,6 +1874,20 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "tracing",
+]
+
+[[package]]
+name = "libp2p-stream"
+version = "0.4.0-alpha"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d6bd8025c80205ec2810cfb28b02f362ab48a01bee32c50ab5f12761e033464"
+dependencies = [
+ "futures",
+ "libp2p-core",
+ "libp2p-identity",
+ "libp2p-swarm",
+ "rand 0.8.5",
  "tracing",
 ]
 

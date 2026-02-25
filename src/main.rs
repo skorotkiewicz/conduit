@@ -37,16 +37,20 @@ struct Cli {
     models: Vec<String>,
     
     /// Port to listen on for local HTTP proxy
-    #[arg(long, default_value_t = 8080)]
+    #[arg(short = 'p', long, default_value_t = 8080)]
     http_port: u16,
 
     /// URL of local LLM backend to proxy requests to (e.g. http://192.168.0.124:8080/v1)
-    #[arg(long)]
+    #[arg(short = 'l', long)]
     local_llm: Option<String>,
 
     /// Path to config.yml file with rate limits and scheduling
-    #[arg(long)]
+    #[arg(short = 'c', long)]
     config: Option<String>,
+
+    /// Optional access key required to use the local API proxy (Authorization: Bearer <key>)
+    #[arg(short = 'a', long)]
+    access_key: Option<String>,
 }
 
 #[tokio::main]
@@ -55,22 +59,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_max_level(Level::INFO)
         .init();
 
-    let cli = Cli::parse();
-
-    let provider_config = if let Some(ref path) = cli.config {
+    let mut cli = Cli::parse();
+    let mut provider_config = None;
+    if let Some(ref path) = cli.config {
         match config::ProviderConfig::load(path) {
             Ok(cfg) => {
                 info!("Loaded configuration from {}: {:?}", path, cfg);
-                Some(cfg)
+                
+                // Merge config file overrides into local CLI variables
+                if let Some(ref models) = cfg.models {
+                    for m in models {
+                        if !cli.models.contains(m) {
+                            cli.models.push(m.clone());
+                        }
+                    }
+                }
+                if let Some(port) = cfg.http_port {
+                    cli.http_port = port;
+                }
+                if let Some(port) = cfg.p2p_port {
+                    cli.p2p_port = port;
+                }
+                if let Some(ref nodes) = cfg.bootstrap_nodes {
+                    // For simplicity, just use the first bootstrap node in the array
+                    if !nodes.is_empty() {
+                        cli.bootstrap = Some(nodes[0].clone());
+                    }
+                }
+                
+                provider_config = Some(cfg);
             }
             Err(e) => {
                 tracing::warn!("Failed to load config from {}: {:?}", path, e);
-                None
             }
         }
-    } else {
-        None
-    };
+    }
 
     // Generate a keypair and PeerId for this node
     let local_key = identity::Keypair::generate_ed25519();
@@ -95,10 +118,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             request_response::Config::default(),
         );
 
+        let stream = libp2p_stream::Behaviour::new();
+
         network::ConduitBehaviour {
             identify,
             kademlia,
             request_response,
+            stream,
         }
     };
 
@@ -131,7 +157,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Set up channels
     let (network_tx, mut network_rx) = mpsc::channel(32);
     let (response_tx, mut response_rx) = mpsc::channel(32);
-    let app_state = api::AppState { network_tx };
+    
+    // let local_llm_url = provider_config.as_ref().and_then(|c| c.local_llm.clone()); // /TUTU
+    
+    let request_timestamps = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::time::Instant>::new()));
+
+    let app_state = api::AppState { 
+        network_tx,
+        access_key: provider_config.as_ref().and_then(|c| c.access_key.clone()),
+        local_llm_api_key: provider_config.as_ref().and_then(|c| c.local_llm_api_key.clone()),
+
+        // local_llm: local_llm_url.clone(),
+        // hosted_models: cli.models.clone(),
+        // provider_config: provider_config.clone(),
+        // request_timestamps: request_timestamps.clone(),
+        // /TUTU
+    };
 
     // Spawn the API server
     let http_port = cli.http_port;
@@ -141,27 +182,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Starting Swarm event loop...");
 
-    // Start providing models immediately (only if we have a local LLM configured)
-    let local_llm_url = provider_config.as_ref().and_then(|c| c.local_llm.clone());
-    
-    if local_llm_url.is_none() && !cli.models.is_empty() {
-        tracing::warn!("Models were provided via --models, but no local_llm backend is configured in the config file. This node will NOT announce itself as a provider to the network.");
-    } else if local_llm_url.is_some() {
-        for model in &cli.models {
-            let key = kad::RecordKey::new(&model.as_bytes());
-            info!("Registering model as provider: {}", model);
-            if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(key) {
-                tracing::error!("Failed to start providing model locally: {:?}", e);
-            }
-        }
-    }
 
     let mut pending_queries = std::collections::HashMap::new();
     let mut pending_requests = std::collections::HashMap::new();
     let mut announce_interval = tokio::time::interval(std::time::Duration::from_secs(30));
 
-    // Rate limiting state
-    let mut request_timestamps: Vec<std::time::Instant> = Vec::new();
+    // Rate limiting state is now in request_timestamps from above
+
+    // Accept incoming raw P2P streams
+    let mut incoming_streams = swarm.behaviour().stream.new_control().accept(StreamProtocol::new("/conduit/stream/1.0.0")).unwrap();
 
     loop {
         tokio::select! {
@@ -178,6 +207,81 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Some((channel, response)) = response_rx.recv() => {
                 let _ = swarm.behaviour_mut().request_response.send_response(channel, response);
             },
+            Some((peer_id, mut stream)) = incoming_streams.next() => {
+                info!("Incoming P2P inference stream requested from peer {}!", peer_id);
+                
+                let config_opt = provider_config.clone();
+                let request_timestamps_cloned = request_timestamps.clone();
+
+                tokio::spawn(async move {
+                    use futures::{AsyncReadExt, AsyncWriteExt};
+
+                    let mut buf = vec![0u8; 8192];
+                    let size = match tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => { tracing::error!("Failed to read inference request from incoming stream"); return; }
+                    };
+
+                    let request: network::InferenceRequest = match serde_json::from_slice(&buf[..size]) {
+                        Ok(req) => req,
+                        Err(e) => { tracing::error!("Failed to parse inference request from stream: {}", e); return; }
+                    };
+
+                    info!("Received inference streaming request for model: {}", request.model);
+                    
+                    if let Some(ref config) = config_opt {
+                        let context_length: u32 = request.messages.iter().map(|m| m.content.len() as u32).sum();
+                        
+                        if let Err(err_msg) = config.validate_request(&request_timestamps_cloned, context_length, request.access_key.as_deref()) {
+                            info!("Rejecting stream request: {}", err_msg);
+                            let err_sse = format!("data: {{\"error\": \"{}\"}}\n\n", err_msg);
+                            let _ = stream.write_all(err_sse.as_bytes()).await;
+                            let _ = stream.flush().await;
+                            let _ = stream.close().await;
+                            return;
+                        }
+                    }
+                    
+                    let local_llm_url = config_opt.as_ref().and_then(|c| c.local_llm.clone());
+                    let local_llm_api_key = config_opt.as_ref().and_then(|c| c.local_llm_api_key.clone());
+                    if let Some(llm_url) = local_llm_url {
+                        let full_url = format!("{}/chat/completions", llm_url.trim_end_matches('/'));
+                        // let client = reqwest::Client::new();
+                        let mut client_builder = reqwest::Client::builder();
+                        
+                        if let Some(api_key) = local_llm_api_key {
+                            let mut headers = axum::http::header::HeaderMap::new();
+                            headers.insert(axum::http::header::AUTHORIZATION, axum::http::header::HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap());
+                            client_builder = client_builder.default_headers(headers);
+                        }
+                        let client = client_builder.build().unwrap();
+
+                        
+                        match client.post(&full_url).json(&request).send().await {
+                            Ok(mut res) => {
+                                while let Some(chunk) = res.chunk().await.unwrap_or(None) {
+                                    if stream.write_all(&chunk).await.is_err() {
+                                        break; // Consumer disconnected
+                                    }
+                                    let _ = stream.flush().await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to contact local LLM for streaming: {}", e);
+                                let err_msg = format!("data: {{\"error\": \"Backend Error: {}\"}}\n\n", e);
+                                let _ = stream.write_all(err_msg.as_bytes()).await;
+                                let _ = stream.flush().await;
+                            }
+                        }
+                    } else {
+                        let err_msg = "data: {\"error\": \"Provider has no compute backend configured.\"}\n\n";
+                        let _ = stream.write_all(err_msg.as_bytes()).await;
+                        let _ = stream.flush().await;
+                    }
+                    
+                    let _ = stream.close().await;
+                });
+            },
             cmd = network_rx.recv() => match cmd {
                 Some(api::NetworkCommand::GetProviders { model, responder }) => {
                     info!("API requested providers for model: {}", model);
@@ -193,6 +297,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     } else {
                         tracing::error!("Invalid peer ID string: {}", peer);
                         let _ = responder.send(None);
+                    }
+                }
+                Some(api::NetworkCommand::OpenInferenceStream { peer, request, chunk_tx }) => {
+                    info!("Opening P2P stream to peer: {}", peer);
+                    if let Ok(peer_id) = PeerId::from_str(&peer) {
+                        // Try to dial the peer first if we aren't connected
+                        if !swarm.is_connected(&peer_id) {
+                            tracing::info!("Not connected to {}; attempting to dial before opening stream", peer_id);
+                            let _ = swarm.dial(peer_id);
+                        }
+
+                        let mut control = swarm.behaviour().stream.new_control();
+                        
+                        tokio::spawn(async move {
+                            // Give the dial a tiny bit of time to establish before requesting the stream multiplex
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            
+                            // Open a stream to the provider node
+                            let protocol = StreamProtocol::new("/conduit/stream/1.0.0");
+                            match control.open_stream(peer_id, protocol).await {
+                                Ok(mut stream) => {
+                                    // 1. Send the JSON request
+                                    let req_bytes = serde_json::to_vec(&request).unwrap();
+                                    use futures::AsyncWriteExt;
+                                    if let Err(e) = stream.write_all(&req_bytes).await {
+                                        let _ = chunk_tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                    let _ = stream.flush().await;
+
+                                    // 2. Read the SSE chunks as they arrive and pipe them back to api.rs
+                                    let mut buf = vec![0u8; 4096];
+                                    use futures::AsyncReadExt;
+                                    loop {
+                                        match stream.read(&mut buf).await {
+                                            Ok(0) => break, // EOF
+                                            Ok(n) => {
+                                                let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                                                if chunk_tx.send(Ok(chunk)).await.is_err() {
+                                                    break; // HTTP Client disconnected
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let _ = chunk_tx.send(Err(e)).await;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to open P2P stream: {:?}", e);
+                                    let _ = chunk_tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, "Stream failed"))).await;
+                                }
+                            }
+                        });
+                    } else {
+                        tracing::error!("Invalid peer ID string: {}", peer);
                     }
                 }
                 None => break,
@@ -226,7 +387,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, .. })) => {
                             if let Some(responder) = pending_queries.remove(&id) {
-                                let peer_ids: Vec<String> = providers.into_iter().map(|p| p.to_string()).collect();
+                                let peer_ids: Vec<String> = providers
+                                    .into_iter()
+                                    .filter(|p| {
+                                        // Filter ourselves out - we bypass libp2p network for self-routing!
+                                        if p == &local_peer_id {
+                                            tracing::debug!("Filtered out self from provider list");
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    })
+                                    .map(|p| p.to_string())
+                                    .collect();
                                 let _ = responder.send(peer_ids);
                             }
                         }
@@ -247,47 +420,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             info!("Received inference request over P2P for model: {}", request.model);
                             
                             if let Some(ref config) = provider_config {
-                                // 1. Schedule Check
-                                if !config.is_within_schedule() {
-                                    info!("Rejecting request: Outside of configured schedule");
+                                let context_length: u32 = request.messages.iter().map(|m| m.content.len() as u32).sum();
+                                
+                                if let Err(err_msg) = config.validate_request(&request_timestamps, context_length, request.access_key.as_deref()) {
+                                    info!("Rejecting P2P request: {}", err_msg);
                                     let _ = swarm.behaviour_mut().request_response.send_response(channel, network::InferenceResponse {
                                         id: "error".to_string(),
-                                        choices: vec![network::Choice { message: network::ChatMessage { role: "system".to_string(), content: "Provider is currently outside of usage hours.".to_string() } }],
+                                        choices: vec![network::Choice { message: network::ChatMessage { role: "system".to_string(), content: err_msg } }],
                                     });
                                     continue;
-                                }
-
-                                // 2. Rate Limit Check
-                                if let Some(ref rate_limit) = config.rate_limit {
-                                    let now = std::time::Instant::now();
-                                    // Remove timestamps older than 60 seconds
-                                    request_timestamps.retain(|t| now.duration_since(*t).as_secs() < 60);
-
-                                    info!("Checking rate limit: {}/{} requests", request_timestamps.len(), rate_limit.requests_per_minute);
-
-                                    if request_timestamps.len() >= rate_limit.requests_per_minute as usize {
-                                        info!("Rejecting request: Rate limit exceeded");
-                                        let _ = swarm.behaviour_mut().request_response.send_response(channel, network::InferenceResponse {
-                                            id: "error".to_string(),
-                                            choices: vec![network::Choice { message: network::ChatMessage { role: "system".to_string(), content: "Provider rate limit exceeded.".to_string() } }],
-                                        });
-                                        continue;
-                                    }
-                                    
-                                    request_timestamps.push(now);
-                                } else {
-                                    info!("No rate limit configured");
                                 }
                             }
 
                             let local_llm_url = provider_config.as_ref().and_then(|c| c.local_llm.clone());
+                            let local_llm_api_key = provider_config.as_ref().and_then(|c| c.local_llm_api_key.clone());
 
                             if let Some(llm_url) = local_llm_url {
                                 let tx = response_tx.clone();
                                 tokio::spawn(async move {
                                     let full_url = format!("{}/chat/completions", llm_url.trim_end_matches('/'));
-                                    let client = reqwest::Client::new();
+                                    // let client = reqwest::Client::new();
+                                    let mut client_builder = reqwest::Client::builder();
                                     
+                                    if let Some(api_key) = local_llm_api_key {
+                                        let mut headers = axum::http::header::HeaderMap::new();
+                                        headers.insert(axum::http::header::AUTHORIZATION, axum::http::header::HeaderValue::from_str(&format!("Bearer {}", api_key)).unwrap());
+                                        client_builder = client_builder.default_headers(headers);
+                                    }
+                                    let client = client_builder.build().unwrap();
+                                    
+
                                     // Make the request to the local LLM
                                     let res = match client.post(&full_url).json(&request).send().await {
                                         Ok(r) => r,
