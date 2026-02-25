@@ -29,7 +29,6 @@ To share a local LLM and act as an entry point for the network, provide your mod
 ```bash
 cargo run --release -- \
   --p2p-port 8000 \
-  --http-port 8888 \
   --models "llama-3" \
   --config config.yml
 ```

@@ -1,11 +1,11 @@
 local_llm: "http://192.168.0.124:8888/v1"
-models: ["llama-3"]
+models: ["glm4", "glm-4"]
 max_context: 5000
 http_port: 8889
 p2p_port: 8000
 bootstrap_nodes: ["/ip4/172.232.46.58/tcp/1334"]
 rate_limit:
-  requests_per_minute: 2
+  requests_per_minute: 20
 schedule:
   start: "00:00"
   end: "23:00"
