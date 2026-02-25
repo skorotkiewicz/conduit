@@ -1,14 +1,5 @@
 ## You can test with my local llm:
 
-```
-models: ["glm4"]
-max_context: 5000
-rate_limit:
-  requests_per_minute: 20
-schedule:
-  start: "00:00"
-  end: "23:00"
-```
 
 ```
 cargo run --release -- \
@@ -34,3 +25,12 @@ curl -X POST http://localhost:8890/v1/chat/completions \
 
 
 
+---
+my setup:
+```
+model: glm4
+max_context: 5000
+rate_limit:
+  requests_per_minute: 20
+
+```
