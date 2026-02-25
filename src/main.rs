@@ -158,7 +158,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (network_tx, mut network_rx) = mpsc::channel(32);
     let (response_tx, mut response_rx) = mpsc::channel(32);
     
-    // let local_llm_url = provider_config.as_ref().and_then(|c| c.local_llm.clone());
+    // let local_llm_url = provider_config.as_ref().and_then(|c| c.local_llm.clone()); // /TUTU
     
     let request_timestamps = std::sync::Arc::new(std::sync::Mutex::new(Vec::<std::time::Instant>::new()));
 
@@ -166,10 +166,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         network_tx,
         access_key: provider_config.as_ref().and_then(|c| c.access_key.clone()),
         local_llm_api_key: provider_config.as_ref().and_then(|c| c.local_llm_api_key.clone()),
+
         // local_llm: local_llm_url.clone(),
         // hosted_models: cli.models.clone(),
         // provider_config: provider_config.clone(),
         // request_timestamps: request_timestamps.clone(),
+        // /TUTU
     };
 
     // Spawn the API server

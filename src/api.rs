@@ -157,7 +157,7 @@ async fn chat_completions(
     let model_name = payload.model.clone();
     let is_streaming = payload.stream.unwrap_or(false);
     
-    // TUTU
+    // // TUTU
     // // 0. Check if we host this model locally!
     // if state.hosted_models.contains(&model_name) {
     //     if let Some(local_url) = state.local_llm {
@@ -165,7 +165,7 @@ async fn chat_completions(
     //         if let Some(ref config) = state.provider_config {
     //             let context_length: u32 = payload.messages.iter().map(|m| m.content.len() as u32).sum();
                 
-    //             if let Err(err_msg) = config.validate_request(&state.request_timestamps, context_length) {
+    //             if let Err(err_msg) = config.validate_request(&state.request_timestamps, context_length, provided_key) {
     //                 if is_streaming {
     //                     let stream = async_stream::stream! { yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("data: {{\"error\": \"{}\"}}\n\n", err_msg))); };
     //                     return Response::builder().header(header::CONTENT_TYPE, "text/event-stream").body(Body::from_stream(stream)).unwrap();
