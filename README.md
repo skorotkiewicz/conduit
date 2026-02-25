@@ -56,7 +56,7 @@ bootstrap_nodes: ["/ip4/YOUR_VPS_IP/tcp/8000"]
 
 # Provider Capabilities
 local_llm: "http://127.0.0.1:11434/v1"
-local_llm_api_key: "sk-xyz123" # Optional downstream auth
+local_llm_api_key: null # Optional downstream auth
 access_key: "tutu" # Required for P2P/Local clients to access this node
 models: ["llama-3", "mistral-7b"]
 

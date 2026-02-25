@@ -1,5 +1,5 @@
 local_llm: "http://192.168.0.124:8888/v1"
-local_llm_api_key: "sk-1234567890" # Optional, if your local llm requires an api key
+local_llm_api_key: null # Optional, if your local llm requires an api key
 models: ["glm4"]
 max_context: 5000
 http_port: 8889
@@ -8,6 +8,6 @@ access_key: "tutu" # Optional, if you want to restrict access to the API
 bootstrap_nodes: ["/ip4/172.232.46.58/tcp/1334"]
 rate_limit:
   requests_per_minute: 20
-schedule:
-  start: "00:00"
-  end: "23:00"
+# schedule:
+#   start: "00:00"
+#   end: "23:00"
