@@ -1,7 +1,9 @@
 use axum::{
     routing::{get, post},
     Router, Json, extract::State,
-    response::sse::{Event, Sse},
+    response::{IntoResponse, Response},
+    body::Body,
+    http::{header, StatusCode},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -106,9 +108,7 @@ async fn list_models(
     })
 }
 
-use axum::response::IntoResponse;
-
-async fn chat_completions(State(state): State<AppState>, Json(payload): Json<InferenceRequest>) -> impl IntoResponse {
+async fn chat_completions(State(state): State<AppState>, Json(payload): Json<InferenceRequest>) -> Response {
     let model_name = payload.model.clone();
     let is_streaming = payload.stream.unwrap_or(false);
     
@@ -150,25 +150,28 @@ async fn chat_completions(State(state): State<AppState>, Json(payload): Json<Inf
             return Json(serde_json::json!({ "error": "Network channel closed" })).into_response();
         }
 
-        // Create an Async Stream of SSE Events
-        let sse_stream = async_stream::stream! {
+        // Create an Async Stream of Raw Bytes
+        let stream = async_stream::stream! {
             while let Some(chunk_result) = chunk_rx.recv().await {
                 match chunk_result {
                     Ok(bytes) => {
-                        if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                            yield Ok::<_, std::convert::Infallible>(Event::default().data(text));
-                        }
+                        yield Ok::<_, std::io::Error>(bytes);
                     }
                     Err(e) => {
-                        let err_msg = format!("Stream error: {}", e);
-                        yield Ok::<_, std::convert::Infallible>(Event::default().data(err_msg));
+                        let err_msg = format!("data: {{\"error\": \"Stream error: {}\"}}\n\n", e);
+                        yield Ok::<_, std::io::Error>(bytes::Bytes::from(err_msg));
                         break;
                     }
                 }
             }
         };
 
-        return Sse::new(sse_stream).into_response();
+        return Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .header(header::CONNECTION, "keep-alive")
+            .body(Body::from_stream(stream))
+            .unwrap();
         
     } else {
         // --- ONE-SHOT MODE ---
