@@ -64,8 +64,20 @@ schedule:
 
 If multiple models are specified via `--models`, Conduit will automatically announce and route requests for all of them to your backend.
 
-### 3. Making Requests
-Once connected, interact with Conduit exactly as you would with the official OpenAI API:
+### 3. Dedicated Bootstrap Node (e.g., on a VPS)
+If you want to run a node *purely* to help other peers discover each other (without hosting any models or making any queries yourself), you can run Conduit on a cloud VPS. Since it defaults to Kademlia Server mode, it will perfectly act as a backbone router!
+
+```bash
+cargo run --release -- \
+  --p2p-port 8000
+```
+*Note: This node will participate in the DHT and route traffic for others, but because no `--models` were provided, it won't announce itself as an AI provider.*
+
+Then, everyone else (consumers and providers) can connect using your VPS IP:
+`--bootstrap /ip4/YOUR_VPS_IP/tcp/8000`
+
+### 4. Making Requests
+Once connected to the swarm, interact with your local Conduit consumer node exactly as you would with the official OpenAI API:
 
 ```bash
 curl -X POST http://localhost:8888/v1/chat/completions \
