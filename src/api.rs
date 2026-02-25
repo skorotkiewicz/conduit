@@ -3,7 +3,7 @@ use axum::{
     Router, Json, extract::State,
     response::{IntoResponse, Response},
     body::Body,
-    http::{header, StatusCode},
+    http::header,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -12,6 +12,10 @@ use crate::network::{InferenceRequest, InferenceResponse};
 #[derive(Clone)]
 pub struct AppState {
     pub network_tx: mpsc::Sender<NetworkCommand>,
+    pub local_llm: Option<String>,
+    pub hosted_models: Vec<String>,
+    pub provider_config: Option<crate::config::ProviderConfig>,
+    pub request_timestamps: std::sync::Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
 }
 
 #[derive(Debug)]
@@ -111,6 +115,63 @@ async fn list_models(
 async fn chat_completions(State(state): State<AppState>, Json(payload): Json<InferenceRequest>) -> Response {
     let model_name = payload.model.clone();
     let is_streaming = payload.stream.unwrap_or(false);
+    
+    // 0. Check if we host this model locally!
+    if state.hosted_models.contains(&model_name) {
+        if let Some(local_url) = state.local_llm {
+            // Apply config restrictions before routing locally
+            if let Some(ref config) = state.provider_config {
+                let context_length: u32 = payload.messages.iter().map(|m| m.content.len() as u32).sum();
+                
+                if let Err(err_msg) = config.validate_request(&state.request_timestamps, context_length) {
+                    if is_streaming {
+                        let stream = async_stream::stream! { yield Ok::<_, std::io::Error>(bytes::Bytes::from(format!("data: {{\"error\": \"{}\"}}\n\n", err_msg))); };
+                        return Response::builder().header(header::CONTENT_TYPE, "text/event-stream").body(Body::from_stream(stream)).unwrap();
+                    } else { 
+                        return Json(serde_json::json!({ "error": err_msg })).into_response(); 
+                    }
+                }
+            }
+
+            let full_url = format!("{}/chat/completions", local_url.trim_end_matches('/'));
+            let client = reqwest::Client::new();
+            
+            if is_streaming {
+                let stream = async_stream::stream! {
+                    match client.post(&full_url).json(&payload).send().await {
+                        Ok(mut res) => {
+                            while let Some(chunk) = res.chunk().await.unwrap_or(None) {
+                                yield Ok::<_, std::io::Error>(chunk);
+                            }
+                        }
+                        Err(e) => {
+                            let err_msg = format!("data: {{\"error\": \"Local Backend Error: {}\"}}\n\n", e);
+                            yield Ok::<_, std::io::Error>(bytes::Bytes::from(err_msg));
+                        }
+                    }
+                };
+                return Response::builder()
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .header(header::CONNECTION, "keep-alive")
+                    .body(Body::from_stream(stream))
+                    .unwrap();
+            } else {
+                match client.post(&full_url).json(&payload).send().await {
+                    Ok(res) => {
+                        let bytes = res.bytes().await.unwrap_or_default();
+                        return Response::builder()
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(bytes))
+                            .unwrap();
+                    }
+                    Err(e) => {
+                        return Json(serde_json::json!({ "error": format!("Local Backend Error: {}", e) })).into_response();
+                    }
+                }
+            }
+        }
+    }
     
     // 1. Find a provider for the model via DHT
     let (tx_providers, rx_providers) = tokio::sync::oneshot::channel();

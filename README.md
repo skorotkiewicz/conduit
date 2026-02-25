@@ -49,20 +49,26 @@ cargo run --release -- \
 Protect your local compute resources by defining rate limits and usage schedules:
 
 ```yaml
-# URL of your local OpenAI-compatible backend (e.g., Ollama, vLLM, LM Studio)
-local_llm: "http://127.0.0.1:11434/v1"
+# Network Settings
+http_port: 8888
+p2p_port: 8000
+bootstrap_nodes: ["/ip4/YOUR_VPS_IP/tcp/8000"]
 
-# Maximum number of requests allowed per minute
+# Provider Capabilities
+local_llm: "http://127.0.0.1:11434/v1"
+models: ["llama-3", "mistral-7b"]
+
+# Protection Rules
+max_context: 5000
 rate_limit:
   requests_per_minute: 10
-
-# Time window when your node is actively sharing (local machine time)
 schedule:
   start: "00:00"
   end: "07:00"
 ```
 
-If multiple models are specified via `--models`, Conduit will automatically announce and route requests for all of them to your backend.
+> [!NOTE] 
+> Configuration constraints (schedules, rate limits, max context window) are universally enforced at the routing layer—meaning they apply symmetrically to P2P network queries, long-running P2P streams, and queries submitted directly to your node's local HTTP proxy.
 
 ### 3. Dedicated Bootstrap Node (e.g., on a VPS)
 If you want to run a node *purely* to help other peers discover each other (without hosting any models or making any queries yourself), you can run Conduit on a cloud VPS. Since it defaults to Kademlia Server mode, it will perfectly act as a backbone router!
