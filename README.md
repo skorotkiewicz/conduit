@@ -69,7 +69,8 @@ If you want to run a node *purely* to help other peers discover each other (with
 
 ```bash
 cargo run --release -- \
-  --p2p-port 8000
+  --p2p-port 8000 \
+  --http-port 9999
 ```
 *Note: This node will participate in the DHT and route traffic for others, but because no `--models` were provided, it won't announce itself as an AI provider.*
 

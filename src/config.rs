@@ -16,6 +16,7 @@ pub struct ScheduleConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    pub max_context: Option<u32>,
     pub rate_limit: Option<RateLimitConfig>,
     pub schedule: Option<ScheduleConfig>,
     pub local_llm: Option<String>,

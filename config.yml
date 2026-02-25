@@ -1,4 +1,5 @@
 local_llm: "http://192.168.0.124:8888/v1"
+max_context: 5000
 rate_limit:
   requests_per_minute: 20
 schedule:

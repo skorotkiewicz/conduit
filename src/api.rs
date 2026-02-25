@@ -1,6 +1,7 @@
 use axum::{
     routing::{get, post},
     Router, Json, extract::State,
+    response::sse::{Event, Sse},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -21,6 +22,12 @@ pub enum NetworkCommand {
         peer: String,
         request: InferenceRequest,
         responder: tokio::sync::oneshot::Sender<Option<InferenceResponse>>,
+    },
+    OpenInferenceStream {
+        peer: String,
+        request: InferenceRequest,
+        // We will send chunks of bytes back over this channel as they arrive from the P2P stream
+        chunk_tx: mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
     }
 }
 
@@ -99,8 +106,11 @@ async fn list_models(
     })
 }
 
-async fn chat_completions(State(state): State<AppState>, Json(payload): Json<InferenceRequest>) -> Json<serde_json::Value> {
+use axum::response::IntoResponse;
+
+async fn chat_completions(State(state): State<AppState>, Json(payload): Json<InferenceRequest>) -> impl IntoResponse {
     let model_name = payload.model.clone();
+    let is_streaming = payload.stream.unwrap_or(false);
     
     // 1. Find a provider for the model via DHT
     let (tx_providers, rx_providers) = tokio::sync::oneshot::channel();
@@ -110,37 +120,74 @@ async fn chat_completions(State(state): State<AppState>, Json(payload): Json<Inf
     };
     
     if state.network_tx.send(cmd).await.is_err() {
-        return Json(serde_json::json!({ "error": "Network channel closed" }));
+        return Json(serde_json::json!({ "error": "Network channel closed" })).into_response();
     }
 
     let providers = match tokio::time::timeout(std::time::Duration::from_secs(5), rx_providers).await {
         Ok(Ok(p)) => p,
-        _ => return Json(serde_json::json!({ "error": "DHT query timed out or failed" })),
+        _ => return Json(serde_json::json!({ "error": "DHT query timed out or failed" })).into_response(),
     };
 
     if providers.is_empty() {
-        return Json(serde_json::json!({ "error": format!("No providers found for model {}", model_name) }));
+        return Json(serde_json::json!({ "error": format!("No providers found for model {}", model_name) })).into_response();
     }
 
     // Just pick the first provider for now
     let peer = providers[0].clone();
 
-    // 2. Send the inference request to the provider
-    let (tx_infer, rx_infer) = tokio::sync::oneshot::channel();
-    let cmd = NetworkCommand::SendInferenceRequest {
-        peer,
-        request: payload,
-        responder: tx_infer,
-    };
+    if is_streaming {
+        // --- STREAMING MODE ---
+        let (chunk_tx, mut chunk_rx) = mpsc::channel(128);
+        
+        // Ask the network loop to open a P2P stream to this peer
+        let cmd = NetworkCommand::OpenInferenceStream {
+            peer,
+            request: payload,
+            chunk_tx,
+        };
 
-    if state.network_tx.send(cmd).await.is_err() {
-        return Json(serde_json::json!({ "error": "Network channel closed" }));
-    }
+        if state.network_tx.send(cmd).await.is_err() {
+            return Json(serde_json::json!({ "error": "Network channel closed" })).into_response();
+        }
 
-    // 3. Wait for the response and return it
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx_infer).await {
-        Ok(Ok(Some(response))) => Json(serde_json::to_value(response).unwrap()),
-        _ => Json(serde_json::json!({ "error": "Request timed out or failed" })),
+        // Create an Async Stream of SSE Events
+        let sse_stream = async_stream::stream! {
+            while let Some(chunk_result) = chunk_rx.recv().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+                            yield Ok::<_, std::convert::Infallible>(Event::default().data(text));
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Stream error: {}", e);
+                        yield Ok::<_, std::convert::Infallible>(Event::default().data(err_msg));
+                        break;
+                    }
+                }
+            }
+        };
+
+        return Sse::new(sse_stream).into_response();
+        
+    } else {
+        // --- ONE-SHOT MODE ---
+        let (tx_infer, rx_infer) = tokio::sync::oneshot::channel();
+        let cmd = NetworkCommand::SendInferenceRequest {
+            peer,
+            request: payload,
+            responder: tx_infer,
+        };
+
+        if state.network_tx.send(cmd).await.is_err() {
+            return Json(serde_json::json!({ "error": "Network channel closed" })).into_response();
+        }
+
+        // Wait for the response and return it
+        match tokio::time::timeout(std::time::Duration::from_secs(30), rx_infer).await {
+            Ok(Ok(Some(response))) => Json(serde_json::to_value(response).unwrap()).into_response(),
+            _ => Json(serde_json::json!({ "error": "Request timed out or failed" })).into_response(),
+        }
     }
 }
 

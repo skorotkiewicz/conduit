@@ -95,10 +95,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             request_response::Config::default(),
         );
 
+        let stream = libp2p_stream::Behaviour::new();
+
         network::ConduitBehaviour {
             identify,
             kademlia,
             request_response,
+            stream,
         }
     };
 
@@ -163,6 +166,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Rate limiting state
     let mut request_timestamps: Vec<std::time::Instant> = Vec::new();
 
+    // Accept incoming raw P2P streams
+    let mut incoming_streams = swarm.behaviour().stream.new_control().accept(StreamProtocol::new("/conduit/stream/1.0.0")).unwrap();
+
     loop {
         tokio::select! {
             _ = announce_interval.tick() => {
@@ -177,6 +183,71 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
             Some((channel, response)) = response_rx.recv() => {
                 let _ = swarm.behaviour_mut().request_response.send_response(channel, response);
+            },
+            Some((peer_id, mut stream)) = incoming_streams.next() => {
+                info!("Incoming P2P inference stream requested from peer {}!", peer_id);
+                
+                let config_opt = provider_config.clone();
+
+                tokio::spawn(async move {
+                    use futures::{AsyncReadExt, AsyncWriteExt};
+
+                    let mut buf = vec![0u8; 8192];
+                    let size = match tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => n,
+                        _ => { tracing::error!("Failed to read inference request from incoming stream"); return; }
+                    };
+
+                    let request: network::InferenceRequest = match serde_json::from_slice(&buf[..size]) {
+                        Ok(req) => req,
+                        Err(e) => { tracing::error!("Failed to parse inference request from stream: {}", e); return; }
+                    };
+
+                    info!("Received inference streaming request for model: {}", request.model);
+                    
+                    if let Some(ref config) = config_opt {
+                        if let Some(max_ctx) = config.max_context {
+                            let context_length: u32 = request.messages.iter().map(|m| m.content.len() as u32).sum();
+                            if context_length > max_ctx {
+                                info!("Rejecting stream request: Context length {} exceeds max {}", context_length, max_ctx);
+                                let err_msg = format!("data: {{\"error\": \"Provider max context exceeded. Received {}, Max {}\"}}\n\n", context_length, max_ctx);
+                                let _ = stream.write_all(err_msg.as_bytes()).await;
+                                let _ = stream.flush().await;
+                                let _ = stream.close().await;
+                                return;
+                            }
+                        }
+                    }
+                    
+                    let local_llm_url = config_opt.as_ref().and_then(|c| c.local_llm.clone());
+                    if let Some(llm_url) = local_llm_url {
+                        let full_url = format!("{}/chat/completions", llm_url.trim_end_matches('/'));
+                        let client = reqwest::Client::new();
+                        
+                        match client.post(&full_url).json(&request).send().await {
+                            Ok(mut res) => {
+                                while let Some(chunk) = res.chunk().await.unwrap_or(None) {
+                                    if stream.write_all(&chunk).await.is_err() {
+                                        break; // Consumer disconnected
+                                    }
+                                    let _ = stream.flush().await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to contact local LLM for streaming: {}", e);
+                                let err_msg = format!("data: {{\"error\": \"Backend Error: {}\"}}\n\n", e);
+                                let _ = stream.write_all(err_msg.as_bytes()).await;
+                                let _ = stream.flush().await;
+                            }
+                        }
+                    } else {
+                        let err_msg = "data: {\"error\": \"Provider has no compute backend configured.\"}\n\n";
+                        let _ = stream.write_all(err_msg.as_bytes()).await;
+                        let _ = stream.flush().await;
+                    }
+                    
+                    let _ = stream.close().await;
+                });
             },
             cmd = network_rx.recv() => match cmd {
                 Some(api::NetworkCommand::GetProviders { model, responder }) => {
@@ -193,6 +264,54 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     } else {
                         tracing::error!("Invalid peer ID string: {}", peer);
                         let _ = responder.send(None);
+                    }
+                }
+                Some(api::NetworkCommand::OpenInferenceStream { peer, request, chunk_tx }) => {
+                    info!("Opening P2P stream to peer: {}", peer);
+                    if let Ok(peer_id) = PeerId::from_str(&peer) {
+                        let mut control = swarm.behaviour().stream.new_control();
+                        
+                        tokio::spawn(async move {
+                            // Open a stream to the provider node
+                            let protocol = StreamProtocol::new("/conduit/stream/1.0.0");
+                            match control.open_stream(peer_id, protocol).await {
+                                Ok(mut stream) => {
+                                    // 1. Send the JSON request
+                                    let req_bytes = serde_json::to_vec(&request).unwrap();
+                                    use futures::AsyncWriteExt;
+                                    if let Err(e) = stream.write_all(&req_bytes).await {
+                                        let _ = chunk_tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                    let _ = stream.flush().await;
+
+                                    // 2. Read the SSE chunks as they arrive and pipe them back to api.rs
+                                    let mut buf = vec![0u8; 4096];
+                                    use futures::AsyncReadExt;
+                                    loop {
+                                        match stream.read(&mut buf).await {
+                                            Ok(0) => break, // EOF
+                                            Ok(n) => {
+                                                let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+                                                if chunk_tx.send(Ok(chunk)).await.is_err() {
+                                                    break; // HTTP Client disconnected
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let _ = chunk_tx.send(Err(e)).await;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to open P2P stream: {:?}", e);
+                                    let _ = chunk_tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, "Stream failed"))).await;
+                                }
+                            }
+                        });
+                    } else {
+                        tracing::error!("Invalid peer ID string: {}", peer);
                     }
                 }
                 None => break,
@@ -277,6 +396,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     request_timestamps.push(now);
                                 } else {
                                     info!("No rate limit configured");
+                                }
+
+                                // 3. Max Context Check
+                                if let Some(max_ctx) = config.max_context {
+                                    let context_length: u32 = request.messages.iter().map(|m| m.content.len() as u32).sum();
+                                    if context_length > max_ctx {
+                                        info!("Rejecting request: Context length {} exceeds max {}", context_length, max_ctx);
+                                        let _ = swarm.behaviour_mut().request_response.send_response(channel, network::InferenceResponse {
+                                            id: "error".to_string(),
+                                            choices: vec![network::Choice { message: network::ChatMessage { role: "system".to_string(), content: format!("Provider max context exceeded. Received {}, Max {}", context_length, max_ctx) } }],
+                                        });
+                                        continue;
+                                    }
                                 }
                             }
 
